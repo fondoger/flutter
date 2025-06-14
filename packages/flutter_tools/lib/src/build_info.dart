@@ -16,6 +16,7 @@ import 'base/logger.dart';
 import 'base/os.dart';
 import 'base/utils.dart';
 import 'convert.dart';
+import 'darwin/darwin.dart';
 import 'globals.dart' as globals;
 import 'runner/flutter_command.dart' show FlutterOptions;
 
@@ -33,6 +34,7 @@ class BuildInfo {
     List<String>? extraGenSnapshotOptions,
     List<String>? fileSystemRoots,
     this.androidProjectArgs = const <String>[],
+    this.androidGradleProjectCacheDir,
     this.fileSystemScheme,
     this.buildNumber,
     this.buildName,
@@ -158,6 +160,9 @@ class BuildInfo {
   /// flag.
   final List<String> androidProjectArgs;
 
+  /// Specifies Gradle's project-specific cache directory.
+  final String? androidGradleProjectCacheDir;
+
   /// The package configuration for the loaded application.
   ///
   /// This is captured once during startup, but the actual package configuration
@@ -251,7 +256,6 @@ class BuildInfo {
   bool get supportsEmulator => isEmulatorBuildMode(mode);
   bool get supportsSimulator => isEmulatorBuildMode(mode);
   String get modeName => mode.cliName;
-  String get friendlyModeName => getFriendlyModeName(mode);
 
   /// the flavor name in the output apk files is lower-cased (see Flutter Gradle Plugin),
   /// so the lower cased flavor name is used to compute the output file name
@@ -367,6 +371,7 @@ class BuildInfo {
         '-Pperformance-measurement-file=$performanceMeasurementFile',
       if (codeSizeDirectory != null) '-Pcode-size-directory=$codeSizeDirectory',
       for (final String projectArg in androidProjectArgs) '-P$projectArg',
+      if (androidGradleProjectCacheDir != null) '--project-cache-dir=$androidGradleProjectCacheDir',
     ];
   }
 }
@@ -435,7 +440,25 @@ enum BuildMode {
   /// Whether this mode is using the precompiled runtime.
   bool get isPrecompiled => !isJit;
 
+  /// [name] formatted in snake case.
+  ///
+  /// (e.g. debug, profile, release, jit_release)
   String get cliName => snakeCase(name);
+
+  /// [cliName] formatted in sentence case.
+  ///
+  /// (e.g. Debug, Profile, Release, Jit_release)
+  String get uppercaseName => sentenceCase(cliName);
+
+  /// [cliName] with `_` replaced with a space.
+  ///
+  /// (e.g. debug, profile, release, jit release)
+  String get friendlyName => cliName.replaceAll('_', ' ');
+
+  /// [friendlyName] formatted in sentence case.
+  ///
+  /// (e.g. Debug, Profile, Release, Jit release)
+  String get uppercaseFriendlyName => sentenceCase(friendlyName);
 
   @override
   String toString() => cliName;
@@ -534,10 +557,6 @@ String? validatedBuildNameForPlatform(
   return buildName;
 }
 
-String getFriendlyModeName(BuildMode mode) {
-  return snakeCase(mode.cliName).replaceAll('_', ' ');
-}
-
 // Returns true if the selected build mode uses ahead-of-time compilation.
 bool isAotBuildMode(BuildMode mode) {
   return mode == BuildMode.profile || mode == BuildMode.release;
@@ -587,33 +606,6 @@ enum TargetPlatform {
       case TargetPlatform.windows_x64:
       case TargetPlatform.windows_arm64:
         throw UnsupportedError('Unexpected Fuchsia platform $this');
-    }
-  }
-
-  String get osName {
-    switch (this) {
-      case TargetPlatform.linux_x64:
-      case TargetPlatform.linux_arm64:
-        return 'linux';
-      case TargetPlatform.darwin:
-        return 'macos';
-      case TargetPlatform.windows_x64:
-      case TargetPlatform.windows_arm64:
-        return 'windows';
-      case TargetPlatform.android:
-      case TargetPlatform.android_arm:
-      case TargetPlatform.android_arm64:
-      case TargetPlatform.android_x64:
-        return 'android';
-      case TargetPlatform.fuchsia_arm64:
-      case TargetPlatform.fuchsia_x64:
-        return 'fuchsia';
-      case TargetPlatform.ios:
-        return 'ios';
-      case TargetPlatform.tester:
-        return 'flutter-tester';
-      case TargetPlatform.web_javascript:
-        return 'web';
     }
   }
 
@@ -739,15 +731,6 @@ DarwinArch getDarwinArchForName(String arch) {
   };
 }
 
-List<DarwinArch> getDarwinArchsFromEnv(Map<String, String> defines) {
-  const List<DarwinArch> defaultDarwinArchitectures = <DarwinArch>[
-    DarwinArch.x86_64,
-    DarwinArch.arm64,
-  ];
-  return defines[kDarwinArchs]?.split(' ').map(getDarwinArchForName).toList() ??
-      defaultDarwinArchitectures;
-}
-
 String getNameForTargetPlatform(TargetPlatform platform, {DarwinArch? darwinArch}) {
   return switch (platform) {
     TargetPlatform.ios when darwinArch != null => 'ios-${darwinArch.name}',
@@ -866,12 +849,12 @@ String getAssetBuildDirectory([Config? config, FileSystem? fileSystem]) {
 
 /// Returns the iOS build output directory.
 String getIosBuildDirectory() {
-  return globals.fs.path.join(getBuildDirectory(), 'ios');
+  return globals.fs.path.join(getBuildDirectory(), FlutterDarwinPlatform.ios.name);
 }
 
 /// Returns the macOS build output directory.
 String getMacOSBuildDirectory() {
-  return globals.fs.path.join(getBuildDirectory(), 'macos');
+  return globals.fs.path.join(getBuildDirectory(), FlutterDarwinPlatform.macos.name);
 }
 
 /// Returns the web build output directory.
@@ -983,6 +966,20 @@ const String kSdkRoot = 'SdkRoot';
 
 /// Whether to enable Dart obfuscation and where to save the symbol map.
 const String kDartObfuscation = 'DartObfuscation';
+
+/// Whether to enable Native Assets.
+///
+/// If true, native assets are built and the mapping for native assets lookup
+/// at runtime is embedded in the kernel file.
+///
+/// If false, native assets are not built, and an empty mapping is embedded in
+/// the kernel file. Used for targets that trigger kernel builds but
+/// are not OS/architecture specific.
+///
+/// Supported values are 'true' and 'false'.
+///
+/// Defaults to 'true'.
+const String kNativeAssets = 'NativeAssets';
 
 /// An output directory where one or more code-size measurements may be written.
 const String kCodeSizeDirectory = 'CodeSizeDirectory';
